@@ -19,12 +19,15 @@ class Config:
     # Current time
     CURRENT_TIME = datetime.utcnow()
 
+# Get the project root directory
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('flag_price_errors.log'),
+        logging.FileHandler(os.path.join(PROJECT_ROOT, 'flag_price_errors.log')),
         logging.StreamHandler()
     ]
 )
@@ -121,10 +124,11 @@ def flag_price_errors():
     """
     Update price_error flags for all prices in the latest run.
     Process:
-    1. First flag extreme prices (>60k MXN and <1k MXN)
-    2. Calculate reference average using 5 MEDIAN prices per smartphone
-    3. Flag prices that are >50% below or 2x above the reference average
-    4. Set price_error to false for all other prices from this run
+    1. First flag NULL values in critical fields (price, retailer_id, smartphone_id)
+    2. Then flag extreme prices (>60k MXN and <1k MXN)
+    3. Calculate reference average using 5 MEDIAN prices per smartphone
+    4. Flag prices that are >50% below or 2x above the reference average
+    5. Set price_error to false for all other prices from this run
     """
     try:
         # Get the latest run_id
@@ -137,6 +141,7 @@ def flag_price_errors():
         
         # Process in batches
         offset = 0
+        total_null = 0
         total_extreme = 0
         total_deviation = 0
         
@@ -153,24 +158,45 @@ def flag_price_errors():
             logger.info(f"Processing batch of {len(prices)} prices (offset: {offset})")
             
             # Process batch
+            null_count = 0
             extreme_count = 0
             for price in prices:
-                if price['currency'] == Config.DEFAULT_CURRENCY:
-                    all_price_ids.add(price['price_id'])
-                    
-                    # Check for extreme prices
-                    if (price['price'] < Config.MIN_PRICE_THRESHOLD or 
-                        price['price'] > Config.MAX_PRICE_THRESHOLD):
+                all_price_ids.add(price['price_id'])
+                
+                # Check for NULL values in critical fields
+                if price.get('price') is None or price.get('retailer_id') is None or price.get('smartphone_id') is None:
+                    null_count += 1
+                    flagged_price_ids.add(price['price_id'])
+                    price_updates = [{
+                        'price_id': price['price_id'], 
+                        'price_error': True, 
+                        'error_reason': 'Missing critical data (NULL values)', 
+                        'date_recorded': datetime.utcnow().isoformat()
+                    }]
+                    batch_update_prices(price_updates, [])
+                    logger.debug(f"Flagged price {price['price_id']} due to NULL values")
+                    continue
+                
+                # Check for extreme prices only if price is not NULL
+                if price['currency'] == Config.DEFAULT_CURRENCY and price['price'] is not None:
+                    if price['price'] < Config.MIN_PRICE_THRESHOLD or price['price'] > Config.MAX_PRICE_THRESHOLD:
                         extreme_count += 1
                         flagged_price_ids.add(price['price_id'])
-                        price_updates = [{'price_id': price['price_id'], 'price_error': True, 'error_reason': 'Extreme price', 'date_recorded': datetime.utcnow().isoformat()}]
+                        price_updates = [{
+                            'price_id': price['price_id'], 
+                            'price_error': True, 
+                            'error_reason': 'Extreme price', 
+                            'date_recorded': datetime.utcnow().isoformat()
+                        }]
                         batch_update_prices(price_updates, [])
+                        logger.debug(f"Flagged price {price['price_id']} as extreme: {price['price']}")
                     else:
-                        # Store ALL non-extreme prices
+                        # Store ALL non-extreme prices that don't have NULL values
                         smartphone_prices[price['smartphone_id']].append((price['price_id'], price['price']))
             
+            total_null += null_count
             total_extreme += extreme_count
-            logger.info(f"Found {extreme_count} extreme prices in current batch")
+            logger.info(f"Found {null_count} prices with NULL values and {extreme_count} extreme prices in current batch")
             
             # Move to next batch
             offset += Config.BATCH_SIZE
@@ -240,12 +266,14 @@ def flag_price_errors():
         
         logger.info(f"Finished processing all prices")
         logger.info(f"Total prices processed: {len(all_price_ids)}")
+        logger.info(f"Total prices with NULL values: {total_null}")
         logger.info(f"Total extreme prices flagged: {total_extreme}")
         logger.info(f"Total deviating prices flagged: {total_deviation}")
         logger.info(f"Total prices marked as valid: {len(valid_price_ids)}")
         
     except Exception as e:
         logger.error(f"Error updating price errors: {str(e)}")
+        logger.exception("Full traceback:")
         raise
 
 if __name__ == "__main__":

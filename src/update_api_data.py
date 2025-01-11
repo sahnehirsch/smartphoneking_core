@@ -11,16 +11,25 @@ from urllib.parse import urlparse
 # Get the project root directory
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Configure logging
+# Ensure log directory exists
+os.makedirs(PROJECT_ROOT, exist_ok=True)
+
+# Configure logging with more verbose settings
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(PROJECT_ROOT, 'update_api_data.log')),
+        logging.FileHandler(os.path.join(PROJECT_ROOT, 'update_api_data.log'), mode='a', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Add a startup message to verify logging
+logger.info("=" * 80)
+logger.info("Starting update_api_data script")
+logger.info(f"Log file location: {os.path.join(PROJECT_ROOT, 'update_api_data.log')}")
+logger.info("=" * 80)
 
 # Load environment variables once at module level
 load_dotenv()
@@ -114,6 +123,19 @@ def get_latest_run_id() -> Optional[str]:
 def get_valid_prices(run_id: str, page: int = 0) -> Tuple[Optional[List[Dict]], bool]:
     """Get valid prices for the given run_id with pagination"""
     try:
+        # First, get total count
+        count_result = supabase.table('prices').select(
+            'price_id', count='exact'
+        ).eq('run_id', run_id).eq('price_error', False).execute()
+        
+        if hasattr(count_result, 'error') and count_result.error:
+            logger.error(f"Error getting total count: {count_result.error}")
+            return None, False
+            
+        total_count = count_result.count if hasattr(count_result, 'count') else 0
+        logger.info(f"Total valid prices for run {run_id}: {total_count}")
+        
+        # Get current page of data
         result = supabase.table('prices').select(
             'smartphone_id,retailer_id,price,product_url,is_hot,hotness_score,run_id'
         ).eq('run_id', run_id).eq('price_error', False).range(
@@ -125,7 +147,12 @@ def get_valid_prices(run_id: str, page: int = 0) -> Tuple[Optional[List[Dict]], 
             logger.error(f"Error getting prices: {result.error}")
             return None, False
             
-        has_more = len(result.data) == Config.PAGE_SIZE
+        current_page_size = len(result.data)
+        logger.debug(f"Retrieved {current_page_size} records for page {page}")
+        
+        # Check if there are more pages
+        has_more = (page + 1) * Config.PAGE_SIZE < total_count
+        
         return result.data, has_more
     except Exception as e:
         logger.error(f"Error getting valid prices: {e}")
@@ -196,6 +223,7 @@ def update_data_for_api() -> bool:
             # Get page of prices
             prices, has_more = get_valid_prices(run_id, page)
             if not prices:
+                logger.error(f"Failed to get prices for page {page}")
                 break
                 
             # Get relevant smartphones for this batch
@@ -223,6 +251,7 @@ def update_data_for_api() -> bool:
                 
                 smartphone = smartphones.get(price['smartphone_id'])
                 if not smartphone:
+                    logger.warning(f"Skipping price due to missing smartphone data: {price['smartphone_id']}")
                     total_skipped += 1
                     continue
                 
@@ -248,11 +277,14 @@ def update_data_for_api() -> bool:
                 batch = data_for_api[i:i + Config.BATCH_SIZE]
                 if insert_data_batch(batch):
                     total_success += len(batch)
+                else:
+                    logger.error(f"Failed to insert batch of size {len(batch)}")
             
             total_processed += len(prices)
-            logger.info(f"Processed {total_processed} records...")
+            logger.info(f"Processed {total_processed} records (Page {page})...")
             
             if not has_more:
+                logger.info("No more pages to process")
                 break
                 
             page += 1
