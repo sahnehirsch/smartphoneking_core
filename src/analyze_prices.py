@@ -14,28 +14,56 @@ supabase: Client = create_client(
     os.getenv('SUPABASE_KEY')
 )
 
+def get_all_prices():
+    """Get all prices with pagination"""
+    all_data = []
+    page = 0
+    page_size = 1000
+    
+    while True:
+        result = supabase.table('data_for_api').select(
+            'smartphone_id,oem,model,price,is_hot,hotness_score'
+        ).range(
+            start=page * page_size,
+            end=(page + 1) * page_size - 1
+        ).execute()
+        
+        if hasattr(result, 'error') and result.error:
+            print(f"Error getting data: {result.error}")
+            return None
+            
+        if not result.data:
+            break
+            
+        all_data.extend(result.data)
+        print(f"Retrieved {len(result.data)} records (total so far: {len(all_data)})")
+        
+        if len(result.data) < page_size:
+            break
+            
+        page += 1
+    
+    return all_data
+
 def analyze_prices():
     """Analyze price distributions and hot prices in data_for_api table"""
     print("\n=== Price Analysis Report ===")
     print(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     # Get all prices
-    result = supabase.table('data_for_api').select(
-        'smartphone_id,oem,model,price,is_hot,hotness_score'
-    ).execute()
-    
-    if hasattr(result, 'error') and result.error:
-        print(f"Error getting data: {result.error}")
+    data = get_all_prices()
+    if not data:
+        print("Error retrieving data")
         return
-
+        
     # Convert to pandas DataFrame
-    df = pd.DataFrame(result.data)
+    df = pd.DataFrame(data)
     
     # Basic statistics
     print("=== Basic Statistics ===")
-    print(f"Total number of prices: {len(df)}")
-    print(f"Number of unique phones: {df['smartphone_id'].nunique()}")
-    print(f"Number of hot prices: {df['is_hot'].sum()}")
+    print(f"Total number of prices: {len(df):,}")
+    print(f"Number of unique phones: {df['smartphone_id'].nunique():,}")
+    print(f"Number of hot prices: {df['is_hot'].sum():,}")
     print(f"Percentage of hot prices: {(df['is_hot'].sum() / len(df)) * 100:.2f}%")
     
     # Price distribution
@@ -61,10 +89,10 @@ def analyze_prices():
     prices_per_phone_sorted = prices_per_phone.sort_values(('price', 'count'), ascending=False)
     for idx, row in prices_per_phone_sorted.head(10).iterrows():
         print(f"{idx[0]} {idx[1]}:")
-        print(f"  - Number of prices: {row[('price', 'count')]:.0f}")
+        print(f"  - Number of prices: {row[('price', 'count')]:,.0f}")
         print(f"  - Price range: {row[('price', 'min')]:,.2f} - {row[('price', 'max')]:,.2f}")
         print(f"  - Average price: {row[('price', 'mean')]:,.2f}")
-        print(f"  - Hot prices: {row[('is_hot', 'sum')]:.0f}")
+        print(f"  - Hot prices: {row[('is_hot', 'sum')]:,.0f}")
     
     # Hot prices analysis
     print("\n=== Hot Prices Analysis ===")
@@ -77,7 +105,15 @@ def analyze_prices():
         print("\n=== Top 5 OEMs by Hot Prices ===")
         hot_by_oem = hot_df.groupby('oem').size().sort_values(ascending=False).head()
         for oem, count in hot_by_oem.items():
-            print(f"{oem}: {count} hot prices")
+            print(f"{oem}: {count:,} hot prices")
+            
+        # Additional hot price statistics
+        print("\n=== Hot Prices Distribution ===")
+        print("Number of hot prices by price range:")
+        price_ranges = [0, 5000, 10000, 15000, 20000, float('inf')]
+        labels = ['0-5k', '5k-10k', '10k-15k', '15k-20k', '20k+']
+        hot_df['price_range'] = pd.cut(hot_df['price'], bins=price_ranges, labels=labels)
+        print(hot_df['price_range'].value_counts().sort_index())
 
 if __name__ == '__main__':
     analyze_prices()
