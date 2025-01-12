@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 import logging
 from supabase import create_client, Client
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from datetime import datetime
 import time
 import re
@@ -221,6 +221,17 @@ def safe_convert_hotness_score(score) -> int:
     except (TypeError, ValueError):
         return 0
 
+def get_existing_product_keys(run_id: str) -> Set[str]:
+    """Get set of existing product keys to avoid duplicates"""
+    try:
+        result = supabase.table('data_for_api').select('smartphone_id,retailer_id,price').eq('run_id', run_id).execute()
+        if hasattr(result, 'data'):
+            return {f"{item['smartphone_id']}-{item['retailer_id']}-{item['price']}" for item in result.data}
+        return set()
+    except Exception as e:
+        logger.error(f"Error getting existing product keys: {e}")
+        return set()
+
 def update_data_for_api() -> bool:
     """Update the data_for_api table with the latest prices."""
     start_time = datetime.utcnow()
@@ -255,8 +266,9 @@ def update_data_for_api() -> bool:
         total_count = count_result.count if hasattr(count_result, 'count') else 0
         logger.info(f"Total records to process: {total_count:,}")
         
-        # Store processed price_ids to avoid duplicates
+        # Store processed price_ids and product keys to avoid duplicates
         processed_price_ids = set()
+        processed_product_keys = get_existing_product_keys(run_id)
         
         while True:
             # Get page of prices with proper ordering
@@ -307,6 +319,13 @@ def update_data_for_api() -> bool:
                     total_skipped += 1
                     continue
                 
+                # Check for duplicate product key
+                product_key = f"{price['smartphone_id']}-{price['retailer_id']}-{price['price']}"
+                if product_key in processed_product_keys:
+                    logger.debug(f"Skipping duplicate product: {product_key}")
+                    total_skipped += 1
+                    continue
+                
                 data_for_api.append({
                     'price_id': price['price_id'],
                     'smartphone_id': price['smartphone_id'],
@@ -325,6 +344,7 @@ def update_data_for_api() -> bool:
                     'run_id': price['run_id']
                 })
                 processed_price_ids.add(price['price_id'])
+                processed_product_keys.add(product_key)
             
             # Insert in batches
             for i in range(0, len(data_for_api), Config.BATCH_SIZE):
