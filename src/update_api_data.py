@@ -226,6 +226,31 @@ def get_retailers(retailer_ids: List[int]) -> Optional[Dict]:
         logger.error(f"Error getting retailers: {e}")
         return None
 
+@retry_on_error()
+def get_existing_hotness_data(smartphone_ids: List[int], retailer_ids: List[int]) -> Dict[str, Dict]:
+    """Get existing hotness data from data_for_api table"""
+    try:
+        result = (supabase.table('data_for_api')
+                 .select('smartphone_id,retailer_id,is_hot,hotness_score')
+                 .in_('smartphone_id', smartphone_ids)
+                 .in_('retailer_id', retailer_ids)
+                 .execute())
+        
+        if not result.data:
+            return {}
+            
+        # Create lookup dictionary using smartphone_id-retailer_id as key
+        return {
+            f"{item['smartphone_id']}-{item['retailer_id']}": {
+                'is_hot': item.get('is_hot', False),
+                'hotness_score': item.get('hotness_score', 0)
+            }
+            for item in result.data
+        }
+    except Exception as e:
+        logger.error(f"Error getting existing hotness data: {e}")
+        return {}
+
 def insert_data_batch(batch: List[Dict]) -> bool:
     """Insert a batch of data into data_for_api table"""
     try:
@@ -296,7 +321,7 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
     
     # Verify all prices in batch with a single query
     verify_result = (supabase.table('prices')
-                    .select('price_id,price_error,price,product_url')
+                    .select('price_id,price_error,price,product_url,is_hot,hotness_score')
                     .in_('price_id', price_ids)
                     .execute())
     
@@ -371,8 +396,8 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
                 'retailer_name': retailer['retailer_name'],
                 'price': price['price'],
                 'product_url': verified_price.get('product_url', ''),
-                'is_hot': False,  # Default value
-                'hotness_score': 0,  # Default value
+                'is_hot': verified_price.get('is_hot', False),  # Get from prices table
+                'hotness_score': verified_price.get('hotness_score', 0),  # Get from prices table
                 'oem': smartphone['oem'],
                 'model': smartphone['model'],
                 'color_variant': smartphone.get('color_variant', None),  # Optional field
@@ -483,6 +508,8 @@ def update_data_for_api() -> bool:
 
 def main():
     try:
+        print("Starting API data update...")
+        
         # Get the latest run_id from the prices table
         latest_run = (supabase.table('prices')
                      .select('run_id,date_recorded')
@@ -499,6 +526,7 @@ def main():
         logger.info(f"Using latest run_id: {run_id} (recorded at: {date_recorded})")
         
         # Delete existing records for the current run_id
+        print("Cleaning up old records...")
         logger.info("Deleting existing records for the current run_id...")
         delete_result = supabase.table('data_for_api').delete().eq('run_id', run_id).execute()
         logger.debug(f"Delete result: data={delete_result.data} count={delete_result.count}")
@@ -517,6 +545,7 @@ def main():
                        .execute())
                        
         total_count = int(count_result.data[0]['count'])
+        print(f"\nProcessing {total_count} records...")
         logger.info(f"Total valid records to process: {total_count}")
         
         # Process records in batches
@@ -574,17 +603,24 @@ def main():
                         logger.error(f"Error inserting batch: {e}")
                         total_skipped += len(data_for_api)
                 
-                logger.info(f"Progress: {total_processed} records processed ({total_skipped} skipped)")
+                # Print progress every 1000 records
+                if total_processed % 1000 == 0:
+                    print(f"Progress: {total_processed}/{total_count} records processed ({total_skipped} skipped)")
             
             if not has_more:
                 break
                 
         elapsed_time = time.time() - start_time
+        print(f"\nFinished processing {total_processed} records in {elapsed_time:.1f} seconds")
+        print(f"Success: {total_processed}, Skipped: {total_skipped}")
+        print("\nAPI data update complete! ")
+        
         logger.info(f"Finished processing {total_processed} records in {elapsed_time:.1f} seconds")
         logger.info(f"Success: {total_processed}, Skipped: {total_skipped}")
         
     except Exception as e:
         logger.error(f"Error in main: {str(e)}")
+        print(f"\nError: {str(e)}")
         raise
 
 if __name__ == '__main__':
