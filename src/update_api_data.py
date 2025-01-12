@@ -41,9 +41,10 @@ supabase: Client = create_client(
 )
 
 class Config:
+    """Configuration settings for the script"""
     # Batch processing
-    BATCH_SIZE = 100
-    PAGE_SIZE = 1000
+    BATCH_SIZE = 1000  # For batching inserts
+    PAGE_SIZE = 5000  # Increased from 1000 to reduce round trips
     
     # Retry settings
     MAX_RETRIES = 3
@@ -131,11 +132,14 @@ def get_valid_prices(run_id: str, page: int) -> Tuple[List[Dict], bool]:
     """Get a page of valid prices, ordered by smartphone_id, retailer_id, price to ensure consistent selection"""
     try:
         offset = page * Config.PAGE_SIZE
+        logger.debug(f"Fetching prices with offset {offset}, run_id {run_id}")
+        
+        # Use a single query with all necessary filters
         result = (supabase.table('prices')
                  .select('*')
                  .eq('run_id', run_id)
                  .eq('price_error', False)
-                 .filter('price', 'not.is', 'null')
+                 .not_('price', 'is', 'null')  # Changed back to not_ as it's more efficient
                  .order('smartphone_id')
                  .order('retailer_id')
                  .order('price')
@@ -152,7 +156,7 @@ def get_valid_prices(run_id: str, page: int) -> Tuple[List[Dict], bool]:
                     .select('price_id')
                     .eq('run_id', run_id)
                     .eq('price_error', False)
-                    .filter('price', 'not.is', 'null')
+                    .not_('price', 'is', 'null')
                     .order('smartphone_id')
                     .order('retailer_id')
                     .order('price')
@@ -260,159 +264,138 @@ def get_existing_product_keys(run_id: str) -> Set[str]:
         logger.error(f"Error getting existing product keys: {e}")
         return set()
 
+def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Set[str]) -> Tuple[List[Dict], int]:
+    """Process a batch of prices and return prepared data and skip count"""
+    data_for_api = []
+    total_skipped = 0
+    
+    # Get all price_ids for batch verification
+    price_ids = [price['price_id'] for price in prices]
+    
+    # Verify all prices in batch with a single query
+    verify_result = (supabase.table('prices')
+                    .select('price_id,price_error,price')
+                    .in_('price_id', price_ids)
+                    .execute())
+    
+    if not verify_result.data:
+        logger.warning(f"Could not verify {len(price_ids)} prices, skipping batch")
+        return [], len(price_ids)
+    
+    # Create a lookup dictionary for verified prices
+    verified_prices = {p['price_id']: p for p in verify_result.data}
+    
+    for price in prices:
+        price_id = price['price_id']
+        
+        # Skip if already processed
+        if price_id in processed_price_ids:
+            logger.debug(f"Skipping already processed price_id: {price_id}")
+            total_skipped += 1
+            continue
+            
+        # Check verification result
+        verified_price = verified_prices.get(price_id)
+        if not verified_price or verified_price['price_error'] or verified_price['price'] is None:
+            logger.warning(f"Price {price_id} failed verification")
+            total_skipped += 1
+            continue
+            
+        # Process valid price
+        try:
+            data_for_api.append({
+                'price_id': price_id,
+                'run_id': run_id,
+                'smartphone_id': price['smartphone_id'],
+                'retailer_id': price['retailer_id'],
+                'price': price['price'],
+                'url': price['url'],
+                'date_recorded': price['date_recorded']
+            })
+            processed_price_ids.add(price_id)
+        except Exception as e:
+            logger.error(f"Error processing price {price_id}: {e}")
+            total_skipped += 1
+            
+    return data_for_api, total_skipped
+
 def update_data_for_api() -> bool:
-    """Update the data_for_api table with the latest prices."""
+    """Update the data_for_api table with the latest price data"""
     start_time = datetime.utcnow()
     logger.info("Starting data_for_api update...")
     
     try:
         # Get the latest run_id
-        run_id = get_latest_run_id()
-        if not run_id:
-            logger.error("Could not get latest run_id")
-            return False
+        latest_run = supabase.table('prices').select('run_id,date_recorded').order('date_recorded', desc=True).limit(1).execute()
+        if not latest_run.data:
+            logger.error("No price data found")
+            return
         
-        logger.info(f"Using data from run {run_id}")
+        run_id = latest_run.data[0]['run_id']
+        date_recorded = latest_run.data[0]['date_recorded']
+        logger.info(f"Using latest run_id: {run_id} (recorded at: {date_recorded})")
+        
+        # Delete old records
+        logger.info("Deleting old records from previous runs...")
+        delete_result = supabase.table('data_for_api').delete().neq('run_id', run_id).execute()
+        logger.info(f"Delete result: {delete_result}")
+        
+        # Get total count for progress reporting
+        count_result = supabase.table('prices').select('count', count='exact').eq('run_id', run_id).eq('price_error', False).not_('price', 'is', 'null').execute()
+        total_count = count_result.count if hasattr(count_result, 'count') else 0
+        logger.info(f"Total valid records to process: {total_count}")
         
         # Process data in pages
         page = 0
         total_processed = 0
         total_skipped = 0
-        total_success = 0
-        
-        # First, delete old records from previous runs
-        logger.info("Deleting old records from previous runs...")
-        try:
-            delete_result = supabase.table('data_for_api').delete().neq('run_id', run_id).execute()
-            logger.info("Successfully deleted old records")
-        except Exception as e:
-            logger.error(f"Error deleting old records: {e}")
-            return False
-        
-        # Get total count for progress reporting
-        count_result = supabase.table('prices').select('*', count='exact').eq('run_id', run_id).eq('price_error', False).execute()
-        total_count = count_result.count if hasattr(count_result, 'count') else 0
-        logger.info(f"Total records to process: {total_count:,}")
-        
-        # Store processed price_ids and product keys to avoid duplicates
         processed_price_ids = set()
-        processed_product_keys = set()
+        current_batch = []
         
         while True:
-            # Get page of prices with proper ordering
+            # Get a page of prices
             prices, has_more = get_valid_prices(run_id, page)
             if not prices:
-                if page == 0:
-                    logger.error("Failed to get prices for first page")
-                    return False
                 break
                 
-            logger.info(f"Processing page {page} ({len(prices)} records)")
-            
-            # Get relevant smartphones and retailers for this batch
-            smartphone_ids = list(set(p['smartphone_id'] for p in prices))
-            retailer_ids = list(set(p['retailer_id'] for p in prices))
-            
-            smartphones = get_smartphones(smartphone_ids)
-            retailers = get_retailers(retailer_ids)
-            
-            if not smartphones:
-                logger.error("Could not get smartphones data")
-                return False
-            
-            if not retailers:
-                logger.error("Could not get retailers data")
-                return False
-            
-            # Process and prepare data
-            data_for_api = []
-            
-            for price in prices:
-                # Recheck price_error status before processing
-                price_check = supabase.table('prices').select('price_error').eq('price_id', price['price_id']).execute()
-                if price_check.data and price_check.data[0]['price_error']:
-                    logger.debug(f"Skipping price_id {price['price_id']} as it was flagged as error after initial retrieval")
-                    total_skipped += 1
-                    continue
+            # Process prices in batches
+            current_batch.extend(prices)
+            while len(current_batch) >= Config.BATCH_SIZE:
+                batch = current_batch[:Config.BATCH_SIZE]
+                current_batch = current_batch[Config.BATCH_SIZE:]
                 
-                # Skip if already processed
-                if price['price_id'] in processed_price_ids:
-                    logger.debug(f"Skipping already processed price_id: {price['price_id']}")
-                    total_skipped += 1
-                    continue
-                    
-                # Skip invalid prices
-                if not validate_price(price['price']):
-                    logger.warning(f"Skipping invalid price: {price['price']}")
-                    total_skipped += 1
-                    continue
-                    
-                # Skip invalid URLs
-                if not validate_url(price.get('product_url')):
-                    logger.warning(f"Skipping invalid URL: {price.get('product_url')}")
-                    total_skipped += 1
-                    continue
+                data_for_api, skipped = process_price_batch(batch, run_id, processed_price_ids)
+                total_skipped += skipped
                 
-                smartphone = smartphones.get(price['smartphone_id'])
-                retailer = retailers.get(price['retailer_id'])
+                if data_for_api:
+                    try:
+                        insert_result = supabase.table('data_for_api').insert(data_for_api).execute()
+                        total_processed += len(data_for_api)
+                    except Exception as e:
+                        logger.error(f"Error inserting batch: {e}")
+                        total_skipped += len(data_for_api)
                 
-                if not smartphone:
-                    logger.warning(f"Skipping price due to missing smartphone data: {price['smartphone_id']}")
-                    total_skipped += 1
-                    continue
-                
-                if not retailer:
-                    logger.warning(f"Skipping price due to missing retailer data: {price['retailer_id']}")
-                    total_skipped += 1
-                    continue
-                
-                # Check for duplicate product key
-                product_key = f"{price['smartphone_id']}-{price['retailer_id']}-{price['price']}"
-                if product_key in processed_product_keys:
-                    logger.debug(f"Skipping duplicate product: {product_key}")
-                    total_skipped += 1
-                    continue
-                
-                data_for_api.append({
-                    'price_id': price['price_id'],
-                    'smartphone_id': price['smartphone_id'],
-                    'retailer_id': price['retailer_id'],
-                    'retailer_name': retailer['retailer_name'],
-                    'price': price['price'],
-                    'product_url': clean_product_url(price.get('product_url')),
-                    'is_hot': price.get('is_hot', False),
-                    'hotness_score': safe_convert_hotness_score(price.get('hotness_score')),
-                    'oem': smartphone['oem'],
-                    'model': smartphone['model'],
-                    'color_variant': smartphone.get('color_variant'),
-                    'ram_variant': smartphone.get('ram_variant'),
-                    'rom_variant': smartphone.get('rom_variant'),
-                    'variant_rank': smartphone.get('variant_rank'),
-                    'os': smartphone.get('os'),
-                    'run_id': price['run_id']
-                })
-                processed_price_ids.add(price['price_id'])
-                processed_product_keys.add(product_key)
-            
-            # Insert in batches
-            if data_for_api:
-                for i in range(0, len(data_for_api), Config.BATCH_SIZE):
-                    batch = data_for_api[i:i + Config.BATCH_SIZE]
-                    if insert_data_batch(batch):
-                        total_success += len(batch)
-                    total_processed += len(batch)
-                    
-                logger.info(f"Progress: {total_processed:,}/{total_count:,} records processed ({total_skipped:,} skipped)")
+                logger.info(f"Progress: {total_processed}/{total_count} records processed ({total_skipped} skipped)")
             
             if not has_more:
                 break
             page += 1
         
-        end_time = datetime.utcnow()
-        duration = (end_time - start_time).total_seconds()
-        logger.info(f"Finished processing {total_processed:,} records in {duration:.1f} seconds")
-        logger.info(f"Success: {total_success:,}, Skipped: {total_skipped:,}")
+        # Process remaining batch
+        if current_batch:
+            data_for_api, skipped = process_price_batch(current_batch, run_id, processed_price_ids)
+            total_skipped += skipped
+            
+            if data_for_api:
+                try:
+                    insert_result = supabase.table('data_for_api').insert(data_for_api).execute()
+                    total_processed += len(data_for_api)
+                except Exception as e:
+                    logger.error(f"Error inserting final batch: {e}")
+                    total_skipped += len(data_for_api)
         
+        logger.info(f"Finished processing {total_processed} records in {time.time() - start_time.time():.1f} seconds")
+        logger.info(f"Success: {total_processed}, Skipped: {total_skipped}")
         return True
         
     except Exception as e:
