@@ -131,10 +131,12 @@ def get_valid_prices(run_id: str, page: int) -> Tuple[List[Dict], bool]:
     """Get a page of valid prices, ordered by smartphone_id, retailer_id, price to ensure consistent selection"""
     try:
         offset = page * Config.PAGE_SIZE
+        # Add check for price_error and add price IS NOT NULL condition
         result = (supabase.table('prices')
                  .select('*')
                  .eq('run_id', run_id)
                  .eq('price_error', False)
+                 .not_('price', 'is', 'null')  # Ensure price is not null
                  .order('smartphone_id')
                  .order('retailer_id')
                  .order('price')
@@ -151,6 +153,7 @@ def get_valid_prices(run_id: str, page: int) -> Tuple[List[Dict], bool]:
                     .select('price_id')
                     .eq('run_id', run_id)
                     .eq('price_error', False)
+                    .not_('price', 'is', 'null')  # Ensure price is not null here too
                     .order('smartphone_id')
                     .order('retailer_id')
                     .order('price')
@@ -326,6 +329,13 @@ def update_data_for_api() -> bool:
             data_for_api = []
             
             for price in prices:
+                # Recheck price_error status before processing
+                price_check = supabase.table('prices').select('price_error').eq('price_id', price['price_id']).execute()
+                if price_check.data and price_check.data[0]['price_error']:
+                    logger.debug(f"Skipping price_id {price['price_id']} as it was flagged as error after initial retrieval")
+                    total_skipped += 1
+                    continue
+                
                 # Skip if already processed
                 if price['price_id'] in processed_price_ids:
                     logger.debug(f"Skipping already processed price_id: {price['price_id']}")
