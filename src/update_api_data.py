@@ -274,7 +274,7 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
     
     # Verify all prices in batch with a single query
     verify_result = (supabase.table('prices')
-                    .select('price_id,price_error,price')
+                    .select('price_id,price_error,price,product_url')
                     .in_('price_id', price_ids)
                     .execute())
     
@@ -309,7 +309,7 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
                 'smartphone_id': price['smartphone_id'],
                 'retailer_id': price['retailer_id'],
                 'price': price['price'],
-                'url': price.get('product_url', '')  # Keep product_url field
+                'product_url': verified_price.get('product_url', '')  # Add product_url from verified price data
             })
             processed_price_ids.add(price_id)
         except Exception as e:
