@@ -14,22 +14,42 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Ensure log directory exists
 os.makedirs(PROJECT_ROOT, exist_ok=True)
 
-# Configure logging with more verbose settings
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(PROJECT_ROOT, 'update_api_data.log'), mode='a', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+def setup_logging():
+    """Set up logging configuration"""
+    log_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'update_api_data.log')
+    
+    # Create formatters
+    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    console_formatter = logging.Formatter('%(levelname)s - %(message)s')
+    
+    # Create and configure file handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(file_formatter)
+    
+    # Create and configure console handler with reduced output
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)  # Only show WARNING and above in console
+    console_handler.setFormatter(console_formatter)
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+    
+    # Reduce logging level for httpx
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+    
+    logger = logging.getLogger(__name__)
+    logger.info('================================================================================')
+    logger.info('Starting update_api_data script')
+    logger.info(f'Log file location: {log_file}')
+    logger.info('================================================================================')
+    
+    return logger
 
-# Add a startup message to verify logging
-logger.info("=" * 80)
-logger.info("Starting update_api_data script")
-logger.info(f"Log file location: {os.path.join(PROJECT_ROOT, 'update_api_data.log')}")
-logger.info("=" * 80)
+logger = setup_logging()
 
 # Load environment variables once at module level
 load_dotenv()
@@ -323,21 +343,21 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
         # Check verification result
         verified_price = verified_prices.get(price_id)
         if not verified_price or verified_price['price_error'] or verified_price['price'] is None:
-            logger.warning(f"Price {price_id} failed verification")
+            logger.debug(f"Price {price_id} failed verification")
             total_skipped += 1
             continue
             
         # Get smartphone data
         smartphone = smartphones.get(smartphone_id)
         if not smartphone:
-            logger.warning(f"No smartphone data found for smartphone_id {smartphone_id}")
+            logger.debug(f"No smartphone data found for smartphone_id {smartphone_id}")
             total_skipped += 1
             continue
 
         # Get retailer data
         retailer = retailers.get(retailer_id)
         if not retailer:
-            logger.warning(f"No retailer data found for retailer_id {retailer_id}")
+            logger.debug(f"No retailer data found for retailer_id {retailer_id}")
             total_skipped += 1
             continue
             
@@ -387,12 +407,12 @@ def update_data_for_api() -> bool:
         # Delete existing records for the current run_id
         logger.info("Deleting existing records for the current run_id...")
         delete_result = supabase.table('data_for_api').delete().eq('run_id', run_id).execute()
-        logger.info(f"Delete result: data={delete_result.data} count={delete_result.count}")
+        logger.debug(f"Delete result: data={delete_result.data} count={delete_result.count}")
         
         # Delete old records from previous runs
         logger.info("Deleting old records from previous runs...")
         delete_result = supabase.table('data_for_api').delete().neq('run_id', run_id).execute()
-        logger.info(f"Delete result: {delete_result}")
+        logger.debug(f"Delete result: {delete_result}")
         
         # Get total count for progress reporting
         count_result = (supabase.table('prices')
@@ -434,7 +454,7 @@ def update_data_for_api() -> bool:
                         logger.error(f"Error inserting batch: {e}")
                         total_skipped += len(data_for_api)
                 
-                logger.info(f"Progress: {total_processed}/{total_count} records processed ({total_skipped} skipped)")
+                logger.info(f"Progress: {total_processed} records processed ({total_skipped} skipped)")
             
             if not has_more:
                 break
@@ -461,5 +481,107 @@ def update_data_for_api() -> bool:
         logger.error(f"Error in update_data_for_api: {e}")
         return False
 
+def main():
+    try:
+        # Get the latest run_id from the prices table
+        latest_run = (supabase.table('prices')
+                     .select('run_id,date_recorded')
+                     .order('date_recorded', desc=True)
+                     .limit(1)
+                     .execute())
+        
+        if not latest_run.data:
+            logger.error("No run_id found in prices table")
+            return
+            
+        run_id = latest_run.data[0]['run_id']
+        date_recorded = latest_run.data[0]['date_recorded']
+        logger.info(f"Using latest run_id: {run_id} (recorded at: {date_recorded})")
+        
+        # Delete existing records for the current run_id
+        logger.info("Deleting existing records for the current run_id...")
+        delete_result = supabase.table('data_for_api').delete().eq('run_id', run_id).execute()
+        logger.debug(f"Delete result: data={delete_result.data} count={delete_result.count}")
+        
+        # Delete old records from previous runs
+        logger.info("Deleting old records from previous runs...")
+        delete_result = supabase.table('data_for_api').delete().neq('run_id', run_id).execute()
+        logger.debug(f"Delete result: {delete_result}")
+        
+        # Get total count of valid records
+        count_result = (supabase.table('prices')
+                       .select('count')
+                       .eq('run_id', run_id)
+                       .eq('price_error', False)
+                       .not_('price', 'is', 'null')
+                       .execute())
+                       
+        total_count = int(count_result.data[0]['count'])
+        logger.info(f"Total valid records to process: {total_count}")
+        
+        # Process records in batches
+        start_time = time.time()
+        total_processed = 0
+        total_skipped = 0
+        processed_price_ids = set()
+        
+        while True:
+            # Get next batch of records
+            prices_result = (supabase.table('prices')
+                           .select('*')
+                           .eq('run_id', run_id)
+                           .eq('price_error', False)
+                           .not_('price', 'is', 'null')
+                           .order('smartphone_id', 'retailer_id', 'price')
+                           .limit(Config.BATCH_SIZE)
+                           .offset(total_processed + total_skipped)
+                           .execute())
+            
+            # Check if there are more records after this batch
+            has_more = False
+            if prices_result.data:
+                next_result = (supabase.table('prices')
+                             .select('price_id')
+                             .eq('run_id', run_id)
+                             .eq('price_error', False)
+                             .not_('price', 'is', 'null')
+                             .order('smartphone_id', 'retailer_id', 'price')
+                             .limit(1)
+                             .offset(total_processed + total_skipped + Config.BATCH_SIZE)
+                             .execute())
+                has_more = bool(next_result.data)
+                
+            if prices_result.data:
+                logger.debug(f"Retrieved {len(prices_result.data)} records for page {(total_processed + total_skipped) // Config.BATCH_SIZE} (has more: {has_more})")
+                
+                # Process batch
+                data_for_api, skipped = process_price_batch(prices_result.data, run_id, processed_price_ids)
+                total_skipped += skipped
+                
+                # Insert processed records
+                if data_for_api:
+                    try:
+                        insert_result = (supabase.table('data_for_api')
+                                       .insert(data_for_api)
+                                       .execute())
+                        total_processed += len(data_for_api)
+                        processed_price_ids.update(d['price_id'] for d in data_for_api)
+                    except Exception as e:
+                        logger.error(f"Error inserting batch: {e}")
+                        total_skipped += len(data_for_api)
+                
+                logger.info(f"Progress: {total_processed} records processed ({total_skipped} skipped)")
+            
+            if not has_more:
+                break
+                
+        elapsed_time = time.time() - start_time
+        logger.info(f"Finished processing {total_processed} records in {elapsed_time:.1f} seconds")
+        logger.info(f"Success: {total_processed}, Skipped: {total_skipped}")
+        
+    except Exception as e:
+        logger.error(f"Error in main: {str(e)}")
+        raise
+
 if __name__ == '__main__':
-    update_data_for_api()
+    main()
