@@ -43,6 +43,41 @@ def diagnose_data():
     print("\n=== Data For API Table ===")
     print(f"Total entries for run {run_id}: {api_data_result.count:,}")
     
+    # Get sample of price_ids from both tables
+    print("\n=== Price ID Analysis ===")
+    prices_sample = supabase.table('prices').select(
+        'price_id'
+    ).eq('run_id', run_id).eq('price_error', False).limit(5).execute()
+    
+    api_data_sample = supabase.table('data_for_api').select(
+        'price_id'
+    ).eq('run_id', run_id).limit(5).execute()
+    
+    print("\nSample price_ids from prices table:")
+    for p in prices_sample.data:
+        print(f"  {p['price_id']}")
+        
+    print("\nSample price_ids from data_for_api table:")
+    for p in api_data_sample.data:
+        print(f"  {p['price_id']}")
+        
+    # Check for any overlapping price_ids
+    all_price_ids = supabase.table('prices').select(
+        'price_id'
+    ).eq('run_id', run_id).eq('price_error', False).execute()
+    
+    api_price_ids = supabase.table('data_for_api').select(
+        'price_id'
+    ).eq('run_id', run_id).execute()
+    
+    prices_set = set(p['price_id'] for p in all_price_ids.data)
+    api_set = set(p['price_id'] for p in api_price_ids.data)
+    
+    overlap = prices_set.intersection(api_set)
+    print(f"\nNumber of overlapping price_ids: {len(overlap):,}")
+    print(f"Number of unique price_ids in prices table: {len(prices_set):,}")
+    print(f"Number of unique price_ids in data_for_api table: {len(api_set):,}")
+    
     # Check for duplicate entries
     print("\n=== Checking for Duplicates ===")
     # Get all entries for duplicate checking
