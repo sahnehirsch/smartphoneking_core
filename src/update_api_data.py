@@ -294,7 +294,10 @@ def insert_data_batch(batch: List[Dict]) -> bool:
 def safe_convert_hotness_score(score) -> int:
     """Safely convert hotness score to integer"""
     try:
-        return int(float(score)) if score is not None else 0
+        if score is None:
+            return 0
+        # Convert to float first, then round to nearest integer
+        return round(float(score))
     except (TypeError, ValueError):
         return 0
 
@@ -347,7 +350,7 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
     
     if not retailers_result.data:
         logger.warning(f"Could not get retailer data for {len(retailer_ids)} retailers, skipping batch")
-        return [], len(price_ids)
+        return [], len(retailer_ids)
         
     # Create lookup dictionaries
     verified_prices = {p['price_id']: p for p in verify_result.data}
@@ -397,7 +400,7 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
                 'price': price['price'],
                 'product_url': verified_price.get('product_url', ''),
                 'is_hot': verified_price.get('is_hot', False),  # Get from prices table
-                'hotness_score': verified_price.get('hotness_score', 0),  # Get from prices table
+                'hotness_score': safe_convert_hotness_score(verified_price.get('hotness_score')),  # Convert to integer
                 'oem': smartphone['oem'],
                 'model': smartphone['model'],
                 'color_variant': smartphone.get('color_variant', None),  # Optional field
