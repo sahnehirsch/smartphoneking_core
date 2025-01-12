@@ -135,23 +135,31 @@ def get_valid_prices(run_id: str, page: int) -> Tuple[List[Dict], bool]:
                  .select('*')
                  .eq('run_id', run_id)
                  .eq('price_error', False)
-                 .order('smartphone_id', desc=False)
-                 .order('retailer_id', desc=False)
-                 .order('price', desc=False)
-                 .range(offset, offset + Config.PAGE_SIZE - 1)
+                 .order('smartphone_id')
+                 .order('retailer_id')
+                 .order('price')
+                 .limit(Config.PAGE_SIZE)
+                 .offset(offset)
                  .execute())
         
         if not hasattr(result, 'data'):
+            logger.error("No data returned from prices query")
             return [], False
             
-        # Check if there are more pages
+        # Check if there are more pages by requesting one more record
         next_page = (supabase.table('prices')
-                    .select('*', count='exact')
+                    .select('price_id')
                     .eq('run_id', run_id)
                     .eq('price_error', False)
-                    .range(offset + Config.PAGE_SIZE, offset + Config.PAGE_SIZE)
+                    .order('smartphone_id')
+                    .order('retailer_id')
+                    .order('price')
+                    .limit(1)
+                    .offset(offset + Config.PAGE_SIZE)
                     .execute())
+        
         has_more = bool(next_page.data) if hasattr(next_page, 'data') else False
+        logger.info(f"Retrieved {len(result.data)} records for page {page} (has more: {has_more})")
         
         return result.data, has_more
     except Exception as e:
