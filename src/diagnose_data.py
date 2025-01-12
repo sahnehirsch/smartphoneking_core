@@ -19,9 +19,24 @@ def get_all_records(table: str, select_query: str, run_id: str, page_size: int =
                    extra_conditions: Dict = None) -> List[Dict]:
     """Get all records from a table using pagination"""
     all_records = []
-    page = 0
+    start = 0
+    
+    # First get total count
+    try:
+        count_query = supabase.table(table).select('*', count='exact').eq('run_id', run_id)
+        if extra_conditions:
+            for key, value in extra_conditions.items():
+                count_query = count_query.eq(key, value)
+        count_result = count_query.execute()
+        total_count = count_result.count
+        print(f"Total records to fetch: {total_count:,}")
+    except Exception as e:
+        print(f"Error getting total count: {e}", file=sys.stderr)
+        return all_records
+
     while True:
         try:
+            print(f"Fetching records {start:,} to {start + page_size - 1:,}...")
             query = supabase.table(table).select(select_query).eq('run_id', run_id)
             
             # Add any extra conditions
@@ -29,26 +44,29 @@ def get_all_records(table: str, select_query: str, run_id: str, page_size: int =
                 for key, value in extra_conditions.items():
                     query = query.eq(key, value)
             
-            # Add pagination
-            result = query.range(
-                page * page_size,
-                (page + 1) * page_size - 1
-            ).execute()
+            # Add pagination using offset and limit instead of range
+            result = query.limit(page_size).offset(start).execute()
             
             if not result.data:
                 break
                 
+            records_count = len(result.data)
             all_records.extend(result.data)
+            print(f"Retrieved {records_count:,} records in this batch")
+            print(f"Total records retrieved so far: {len(all_records):,}")
             
-            if len(result.data) < page_size:
+            if records_count < page_size or len(all_records) >= total_count:
                 break
                 
-            page += 1
-            print(f"Retrieved {len(all_records):,} records so far...")
+            start += page_size
             
         except Exception as e:
-            print(f"Error retrieving records: {e}", file=sys.stderr)
-            break
+            print(f"Error retrieving records at offset {start}: {e}", file=sys.stderr)
+            # Don't break, try next batch
+            start += page_size
+            
+    if len(all_records) < total_count:
+        print(f"Warning: Only retrieved {len(all_records):,} records out of {total_count:,}", file=sys.stderr)
     
     return all_records
 
