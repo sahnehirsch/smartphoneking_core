@@ -4,6 +4,7 @@ from supabase import create_client, Client
 from datetime import datetime
 from collections import defaultdict
 import sys
+from typing import List, Dict, Set, Tuple
 
 # Load environment variables
 load_dotenv()
@@ -14,18 +15,68 @@ supabase: Client = create_client(
     os.getenv('SUPABASE_KEY')
 )
 
-def get_table_info(table_name: str) -> dict:
-    """Get table structure information"""
-    try:
-        # Using RPC call to get table information
-        result = supabase.rpc(
-            'get_table_info',
-            {'table_name': table_name}
-        ).execute()
-        return result.data if result.data else {}
-    except Exception as e:
-        print(f"Error getting table info for {table_name}: {e}", file=sys.stderr)
+def get_all_records(table: str, select_query: str, run_id: str, page_size: int = 1000, 
+                   extra_conditions: Dict = None) -> List[Dict]:
+    """Get all records from a table using pagination"""
+    all_records = []
+    page = 0
+    while True:
+        try:
+            query = supabase.table(table).select(select_query).eq('run_id', run_id)
+            
+            # Add any extra conditions
+            if extra_conditions:
+                for key, value in extra_conditions.items():
+                    query = query.eq(key, value)
+            
+            # Add pagination
+            result = query.range(
+                page * page_size,
+                (page + 1) * page_size - 1
+            ).execute()
+            
+            if not result.data:
+                break
+                
+            all_records.extend(result.data)
+            
+            if len(result.data) < page_size:
+                break
+                
+            page += 1
+            print(f"Retrieved {len(all_records):,} records so far...")
+            
+        except Exception as e:
+            print(f"Error retrieving records: {e}", file=sys.stderr)
+            break
+    
+    return all_records
+
+def analyze_sequential_patterns(price_ids: List[int]) -> Dict:
+    """Analyze patterns in sequential price_ids"""
+    if not price_ids:
         return {}
+        
+    sorted_ids = sorted(price_ids)
+    sequences = []
+    current_seq = [sorted_ids[0]]
+    
+    for i in range(1, len(sorted_ids)):
+        if sorted_ids[i] == sorted_ids[i-1] + 1:
+            current_seq.append(sorted_ids[i])
+        else:
+            if len(current_seq) > 1:
+                sequences.append(current_seq)
+            current_seq = [sorted_ids[i]]
+    
+    if len(current_seq) > 1:
+        sequences.append(current_seq)
+        
+    return {
+        'total_sequences': len(sequences),
+        'longest_sequence': max((len(s) for s in sequences), default=0),
+        'sequences': sequences[:5]  # Show only first 5 sequences
+    }
 
 def diagnose_data():
     """Diagnose potential issues with data_for_api and prices tables"""
@@ -63,32 +114,28 @@ def diagnose_data():
     except Exception as e:
         print(f"Error querying data_for_api table: {e}", file=sys.stderr)
     
-    # Get sample of price_ids from both tables
+    # Get price_ids from both tables with pagination
     print("\n=== Price ID Analysis ===")
     try:
-        # Get ALL price_ids from prices table
         print("\nGetting price_ids from prices table...")
-        all_prices_ids = supabase.table('prices').select(
-            'price_id'
-        ).eq('run_id', run_id).eq('price_error', False).execute()
+        prices_records = get_all_records('prices', 'price_id', run_id, 
+                                       extra_conditions={'price_error': False})
         
-        print("Getting price_ids from data_for_api table...")
-        all_api_ids = supabase.table('data_for_api').select(
-            'price_id'
-        ).eq('run_id', run_id).execute()
+        print("\nGetting price_ids from data_for_api table...")
+        api_records = get_all_records('data_for_api', 'price_id', run_id)
         
         # Sample display
         print("\nSample price_ids from prices table (first 5):")
-        for p in all_prices_ids.data[:5]:
+        for p in prices_records[:5]:
             print(f"  {p['price_id']}")
             
         print("\nSample price_ids from data_for_api table (first 5):")
-        for p in all_api_ids.data[:5]:
+        for p in api_records[:5]:
             print(f"  {p['price_id']}")
         
         # Full analysis
-        prices_set = set(p['price_id'] for p in all_prices_ids.data)
-        api_set = set(p['price_id'] for p in all_api_ids.data)
+        prices_set = set(p['price_id'] for p in prices_records)
+        api_set = set(p['price_id'] for p in api_records)
         
         print(f"\nNumber of unique price_ids in prices table: {len(prices_set):,}")
         print(f"Number of unique price_ids in data_for_api table: {len(api_set):,}")
@@ -108,26 +155,37 @@ def diagnose_data():
     except Exception as e:
         print(f"Error during price_id analysis: {e}", file=sys.stderr)
     
-    # Check for duplicate entries
+    # Check for duplicate entries with enhanced analysis
     print("\n=== Checking for Duplicates ===")
     try:
-        # Get all entries for duplicate checking
-        all_entries = supabase.table('data_for_api').select(
-            'smartphone_id,retailer_id,price,price_id,run_id'
-        ).eq('run_id', run_id).execute()
+        print("Getting all entries for duplicate analysis...")
+        all_entries = get_all_records('data_for_api', 
+                                    'smartphone_id,retailer_id,price,price_id,run_id', 
+                                    run_id)
         
         # Process results to find duplicates
         entry_counts = defaultdict(list)  # Changed to list to store price_ids
-        for entry in all_entries.data:
+        for entry in all_entries:
             key = f"{entry['smartphone_id']}-{entry['retailer_id']}-{entry['price']}"
             entry_counts[key].append(entry['price_id'])
         
         duplicates = {k: v for k, v in entry_counts.items() if len(v) > 1}
-        print(f"Found {len(duplicates)} keys with duplicates")
+        print(f"\nFound {len(duplicates)} keys with duplicates")
+        
         if duplicates:
             print("\nTop 5 duplicated entries:")
             for key, price_ids in sorted(duplicates.items(), key=lambda x: len(x[1]), reverse=True)[:5]:
-                print(f"Key {key}: {len(price_ids)} occurrences (price_ids: {price_ids})")
+                print(f"\nKey {key}:")
+                print(f"  {len(price_ids)} occurrences")
+                print(f"  Price IDs: {sorted(price_ids)}")
+                
+                # Analyze sequential patterns
+                patterns = analyze_sequential_patterns(price_ids)
+                if patterns['total_sequences'] > 0:
+                    print(f"  Sequential patterns found:")
+                    print(f"    Number of sequences: {patterns['total_sequences']}")
+                    print(f"    Longest sequence: {patterns['longest_sequence']} IDs")
+                    print(f"    Sample sequences: {patterns['sequences']}")
     except Exception as e:
         print(f"Error checking for duplicates: {e}", file=sys.stderr)
     
