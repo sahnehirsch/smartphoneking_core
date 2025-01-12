@@ -139,12 +139,33 @@ def analyze_duplicates(data: List[Dict]) -> None:
         print(f"    Longest sequence: {max((len(s) for s in sequences), default=0)} IDs")
         print(f"    Sample sequences: {sequences[:5]}\n")
 
+def get_latest_run_id() -> str:
+    """Get the latest run_id from prices table"""
+    try:
+        result = supabase.table('prices').select(
+            'run_id,date_recorded'
+        ).order('date_recorded', desc=True).limit(1).execute()
+        
+        if not result.data:
+            print("No runs found in prices table", file=sys.stderr)
+            return None
+            
+        run_id = result.data[0]['run_id']
+        print(f"Using latest run_id: {run_id} (recorded at: {result.data[0]['date_recorded']})")
+        return run_id
+    except Exception as e:
+        print(f"Error getting latest run_id: {e}", file=sys.stderr)
+        return None
+
 def diagnose_data():
     """Diagnose potential issues with data_for_api and prices tables"""
     print("\n=== Data Diagnosis Report ===")
     print(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
-    run_id = 'f4a119db-945b-4670-ab24-5937b59261ab'
+    run_id = get_latest_run_id()
+    if not run_id:
+        print("Could not get latest run_id", file=sys.stderr)
+        return
 
     # Check prices table first
     try:
