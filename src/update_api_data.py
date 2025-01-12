@@ -139,7 +139,7 @@ def get_valid_prices(run_id: str, page: int) -> Tuple[List[Dict], bool]:
                  .select('*')
                  .eq('run_id', run_id)
                  .eq('price_error', False)
-                 .not_('price', 'is', 'null')  # Changed back to not_ as it's more efficient
+                 .filter('price', 'not.is', 'null')  
                  .order('smartphone_id')
                  .order('retailer_id')
                  .order('price')
@@ -156,7 +156,7 @@ def get_valid_prices(run_id: str, page: int) -> Tuple[List[Dict], bool]:
                     .select('price_id')
                     .eq('run_id', run_id)
                     .eq('price_error', False)
-                    .not_('price', 'is', 'null')
+                    .filter('price', 'not.is', 'null')  
                     .order('smartphone_id')
                     .order('retailer_id')
                     .order('price')
@@ -321,7 +321,7 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
 
 def update_data_for_api() -> bool:
     """Update the data_for_api table with the latest price data"""
-    start_time = datetime.utcnow()
+    start_time = time.time()  
     logger.info("Starting data_for_api update...")
     
     try:
@@ -329,7 +329,7 @@ def update_data_for_api() -> bool:
         latest_run = supabase.table('prices').select('run_id,date_recorded').order('date_recorded', desc=True).limit(1).execute()
         if not latest_run.data:
             logger.error("No price data found")
-            return
+            return False
         
         run_id = latest_run.data[0]['run_id']
         date_recorded = latest_run.data[0]['date_recorded']
@@ -341,7 +341,12 @@ def update_data_for_api() -> bool:
         logger.info(f"Delete result: {delete_result}")
         
         # Get total count for progress reporting
-        count_result = supabase.table('prices').select('count', count='exact').eq('run_id', run_id).eq('price_error', False).not_('price', 'is', 'null').execute()
+        count_result = (supabase.table('prices')
+                       .select('count', count='exact')
+                       .eq('run_id', run_id)
+                       .eq('price_error', False)
+                       .filter('price', 'not.is', 'null')  
+                       .execute())
         total_count = count_result.count if hasattr(count_result, 'count') else 0
         logger.info(f"Total valid records to process: {total_count}")
         
@@ -394,7 +399,7 @@ def update_data_for_api() -> bool:
                     logger.error(f"Error inserting final batch: {e}")
                     total_skipped += len(data_for_api)
         
-        logger.info(f"Finished processing {total_processed} records in {time.time() - start_time.time():.1f} seconds")
+        logger.info(f"Finished processing {total_processed} records in {time.time() - start_time:.1f} seconds")
         logger.info(f"Success: {total_processed}, Skipped: {total_skipped}")
         return True
         
