@@ -174,23 +174,44 @@ def get_smartphones(smartphone_ids: List[int]) -> Optional[Dict]:
         logger.error(f"Error getting smartphones: {e}")
         return None
 
-@retry_on_error()
 def insert_data_batch(batch: List[Dict]) -> bool:
     """Insert a batch of data into data_for_api table"""
     try:
-        # First, delete any existing records with these price_ids
+        # First, delete any existing records with these price_ids to avoid conflicts
         price_ids = [item['price_id'] for item in batch]
-        delete_result = supabase.table('data_for_api').delete().in_('price_id', price_ids).execute()
+        if price_ids:
+            try:
+                delete_result = supabase.table('data_for_api').delete().in_('price_id', price_ids).execute()
+                logger.debug(f"Deleted {len(price_ids)} existing records")
+            except Exception as e:
+                logger.warning(f"Error deleting existing records: {e}")
         
-        # Then insert the new records
-        result = supabase.table('data_for_api').insert(batch).execute()
-        
-        if hasattr(result, 'error') and result.error:
-            logger.error(f"Error inserting batch: {result.error}")
+        # Then insert new records
+        try:
+            result = supabase.table('data_for_api').insert(batch).execute()
+            if hasattr(result, 'error') and result.error:
+                if 'duplicate key value violates unique constraint' in str(result.error):
+                    logger.warning(f"Duplicate key violation for price_ids: {price_ids}")
+                    # Try one by one to identify problematic records
+                    success_count = 0
+                    for item in batch:
+                        try:
+                            single_result = supabase.table('data_for_api').insert([item]).execute()
+                            if not (hasattr(single_result, 'error') and single_result.error):
+                                success_count += 1
+                        except Exception as e:
+                            logger.warning(f"Failed to insert price_id {item['price_id']}: {e}")
+                    return success_count > 0
+                else:
+                    logger.error(f"Error inserting batch: {result.error}")
+                    return False
+            return True
+        except Exception as e:
+            logger.error(f"Error inserting batch: {e}")
             return False
-        return True
+            
     except Exception as e:
-        logger.error(f"Error inserting batch: {e}")
+        logger.error(f"Error in insert_data_batch: {e}")
         return False
 
 def safe_convert_hotness_score(score) -> int:
@@ -222,12 +243,20 @@ def update_data_for_api() -> bool:
         
         # First, delete old records from previous runs
         logger.info("Deleting old records from previous runs...")
-        delete_result = supabase.table('data_for_api').delete().neq('run_id', run_id).execute()
+        try:
+            delete_result = supabase.table('data_for_api').delete().neq('run_id', run_id).execute()
+            logger.info("Successfully deleted old records")
+        except Exception as e:
+            logger.error(f"Error deleting old records: {e}")
+            return False
         
         # Get total count for progress reporting
         count_result = supabase.table('prices').select('*', count='exact').eq('run_id', run_id).eq('price_error', False).execute()
         total_count = count_result.count if hasattr(count_result, 'count') else 0
         logger.info(f"Total records to process: {total_count:,}")
+        
+        # Store processed price_ids to avoid duplicates
+        processed_price_ids = set()
         
         while True:
             # Get page of prices with proper ordering
@@ -236,6 +265,15 @@ def update_data_for_api() -> bool:
                 logger.error(f"Failed to get prices for page {page}")
                 break
                 
+            # Filter out already processed price_ids
+            prices = [p for p in prices if p['price_id'] not in processed_price_ids]
+            if not prices:
+                logger.info(f"All prices in page {page} already processed, continuing...")
+                if not has_more:
+                    break
+                page += 1
+                continue
+            
             # Get relevant smartphones for this batch
             smartphone_ids = list(set(p['smartphone_id'] for p in prices))
             smartphones = get_smartphones(smartphone_ids)
@@ -247,6 +285,10 @@ def update_data_for_api() -> bool:
             data_for_api = []
             
             for price in prices:
+                # Skip if already processed
+                if price['price_id'] in processed_price_ids:
+                    continue
+                    
                 # Skip invalid prices
                 if not validate_price(price['price']):
                     logger.warning(f"Skipping invalid price: {price['price']}")
@@ -266,7 +308,7 @@ def update_data_for_api() -> bool:
                     continue
                 
                 data_for_api.append({
-                    'price_id': price['price_id'],  # Include price_id in the data
+                    'price_id': price['price_id'],
                     'smartphone_id': price['smartphone_id'],
                     'retailer_id': price['retailer_id'],
                     'price': price['price'],
@@ -282,6 +324,7 @@ def update_data_for_api() -> bool:
                     'os': smartphone.get('os'),
                     'run_id': price['run_id']
                 })
+                processed_price_ids.add(price['price_id'])
             
             # Insert in batches
             for i in range(0, len(data_for_api), Config.BATCH_SIZE):
