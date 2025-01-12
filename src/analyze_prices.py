@@ -17,31 +17,44 @@ supabase: Client = create_client(
 def get_all_prices():
     """Get all prices with pagination"""
     all_data = []
-    page = 0
-    page_size = 1000
+    start = 0
+    batch_size = 1000
     
-    while True:
-        result = supabase.table('data_for_api').select(
-            'smartphone_id,oem,model,price,is_hot,hotness_score'
-        ).range(
-            start=page * page_size,
-            end=(page + 1) * page_size - 1
-        ).execute()
+    # First, get total count
+    count_result = supabase.table('data_for_api').select(
+        '*', count='exact'
+    ).limit(1).execute()
+    
+    if hasattr(count_result, 'error') and count_result.error:
+        print(f"Error getting count: {count_result.error}")
+        return None
         
-        if hasattr(result, 'error') and result.error:
-            print(f"Error getting data: {result.error}")
+    total_count = count_result.count
+    print(f"Total records to retrieve: {total_count:,}")
+    
+    # Now get all data in batches
+    while start < total_count:
+        try:
+            result = supabase.table('data_for_api').select(
+                'smartphone_id,oem,model,price,is_hot,hotness_score'
+            ).range(start, start + batch_size - 1).execute()
+            
+            if hasattr(result, 'error') and result.error:
+                print(f"Error getting data batch: {result.error}")
+                return None
+                
+            batch_data = result.data
+            all_data.extend(batch_data)
+            print(f"Retrieved {len(batch_data):,} records (total so far: {len(all_data):,} of {total_count:,})")
+            
+            if not batch_data:
+                break
+                
+            start += batch_size
+            
+        except Exception as e:
+            print(f"Error retrieving batch starting at {start}: {str(e)}")
             return None
-            
-        if not result.data:
-            break
-            
-        all_data.extend(result.data)
-        print(f"Retrieved {len(result.data)} records (total so far: {len(all_data)})")
-        
-        if len(result.data) < page_size:
-            break
-            
-        page += 1
     
     return all_data
 
@@ -96,7 +109,7 @@ def analyze_prices():
     
     # Hot prices analysis
     print("\n=== Hot Prices Analysis ===")
-    hot_df = df[df['is_hot']]
+    hot_df = df[df['is_hot']].copy()  # Create a copy to avoid SettingWithCopyWarning
     if len(hot_df) > 0:
         print(f"Average hotness score: {hot_df['hotness_score'].mean():.2f}")
         print(f"Average price of hot items: {hot_df['price'].mean():,.2f}")
@@ -112,7 +125,7 @@ def analyze_prices():
         print("Number of hot prices by price range:")
         price_ranges = [0, 5000, 10000, 15000, 20000, float('inf')]
         labels = ['0-5k', '5k-10k', '10k-15k', '15k-20k', '20k+']
-        hot_df['price_range'] = pd.cut(hot_df['price'], bins=price_ranges, labels=labels)
+        hot_df.loc[:, 'price_range'] = pd.cut(hot_df['price'], bins=price_ranges, labels=labels)
         print(hot_df['price_range'].value_counts().sort_index())
 
 if __name__ == '__main__':
