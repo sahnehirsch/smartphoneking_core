@@ -178,11 +178,12 @@ def get_smartphones(smartphone_ids: List[int]) -> Optional[Dict]:
 def insert_data_batch(batch: List[Dict]) -> bool:
     """Insert a batch of data into data_for_api table"""
     try:
-        # Use upsert with price_id as the unique key
-        result = supabase.table('data_for_api').upsert(
-            batch,
-            on_conflict='price_id'  # Use price_id as the unique constraint
-        ).execute()
+        # First, delete any existing records with these price_ids
+        price_ids = [item['price_id'] for item in batch]
+        delete_result = supabase.table('data_for_api').delete().in_('price_id', price_ids).execute()
+        
+        # Then insert the new records
+        result = supabase.table('data_for_api').insert(batch).execute()
         
         if hasattr(result, 'error') and result.error:
             logger.error(f"Error inserting batch: {result.error}")
@@ -223,8 +224,13 @@ def update_data_for_api() -> bool:
         logger.info("Deleting old records from previous runs...")
         delete_result = supabase.table('data_for_api').delete().neq('run_id', run_id).execute()
         
+        # Get total count for progress reporting
+        count_result = supabase.table('prices').select('*', count='exact').eq('run_id', run_id).eq('price_error', False).execute()
+        total_count = count_result.count if hasattr(count_result, 'count') else 0
+        logger.info(f"Total records to process: {total_count:,}")
+        
         while True:
-            # Get page of prices
+            # Get page of prices with proper ordering
             prices, has_more = get_valid_prices(run_id, page)
             if not prices:
                 logger.error(f"Failed to get prices for page {page}")
@@ -286,7 +292,7 @@ def update_data_for_api() -> bool:
                     logger.error(f"Failed to insert batch of size {len(batch)}")
             
             total_processed += len(prices)
-            logger.info(f"Processed {total_processed} records (Page {page})...")
+            logger.info(f"Processed {total_processed:,} records (Page {page})...")
             
             if not has_more:
                 logger.info("No more pages to process")
@@ -300,7 +306,7 @@ def update_data_for_api() -> bool:
         # Log completion
         execution_time = (datetime.utcnow() - start_time).total_seconds()
         logger.info(
-            f"Successfully inserted {total_success}/{total_processed} records "
+            f"Successfully inserted {total_success:,}/{total_processed:,} records "
             f"in {execution_time:.2f} seconds"
         )
         
