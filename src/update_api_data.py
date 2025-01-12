@@ -269,8 +269,10 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
     data_for_api = []
     total_skipped = 0
     
-    # Get all price_ids for batch verification
+    # Get all IDs for batch verification
     price_ids = [price['price_id'] for price in prices]
+    smartphone_ids = list(set(price['smartphone_id'] for price in prices))
+    retailer_ids = list(set(price['retailer_id'] for price in prices))
     
     # Verify all prices in batch with a single query
     verify_result = (supabase.table('prices')
@@ -282,11 +284,35 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
         logger.warning(f"Could not verify {len(price_ids)} prices, skipping batch")
         return [], len(price_ids)
     
-    # Create a lookup dictionary for verified prices
+    # Get smartphone data
+    smartphones_result = (supabase.table('smartphones')
+                        .select('smartphone_id,oem,model,color_variant,ram_variant,rom_variant,variant_rank,os')
+                        .in_('smartphone_id', smartphone_ids)
+                        .execute())
+    
+    if not smartphones_result.data:
+        logger.warning(f"Could not get smartphone data for {len(smartphone_ids)} smartphones, skipping batch")
+        return [], len(price_ids)
+
+    # Get retailer data
+    retailers_result = (supabase.table('retailers')
+                       .select('retailer_id,retailer_name')
+                       .in_('retailer_id', retailer_ids)
+                       .execute())
+    
+    if not retailers_result.data:
+        logger.warning(f"Could not get retailer data for {len(retailer_ids)} retailers, skipping batch")
+        return [], len(price_ids)
+        
+    # Create lookup dictionaries
     verified_prices = {p['price_id']: p for p in verify_result.data}
+    smartphones = {s['smartphone_id']: s for s in smartphones_result.data}
+    retailers = {r['retailer_id']: r for r in retailers_result.data}
     
     for price in prices:
         price_id = price['price_id']
+        smartphone_id = price['smartphone_id']
+        retailer_id = price['retailer_id']
         
         # Skip if already processed
         if price_id in processed_price_ids:
@@ -301,15 +327,39 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
             total_skipped += 1
             continue
             
+        # Get smartphone data
+        smartphone = smartphones.get(smartphone_id)
+        if not smartphone:
+            logger.warning(f"No smartphone data found for smartphone_id {smartphone_id}")
+            total_skipped += 1
+            continue
+
+        # Get retailer data
+        retailer = retailers.get(retailer_id)
+        if not retailer:
+            logger.warning(f"No retailer data found for retailer_id {retailer_id}")
+            total_skipped += 1
+            continue
+            
         # Process valid price
         try:
             data_for_api.append({
                 'price_id': price_id,
                 'run_id': run_id,
-                'smartphone_id': price['smartphone_id'],
-                'retailer_id': price['retailer_id'],
+                'smartphone_id': smartphone_id,
+                'retailer_id': retailer_id,
+                'retailer_name': retailer['retailer_name'],
                 'price': price['price'],
-                'product_url': verified_price.get('product_url', '')  # Add product_url from verified price data
+                'product_url': verified_price.get('product_url', ''),
+                'is_hot': False,  # Default value
+                'hotness_score': 0,  # Default value
+                'oem': smartphone['oem'],
+                'model': smartphone['model'],
+                'color_variant': smartphone.get('color_variant', None),  # Optional field
+                'ram_variant': smartphone.get('ram_variant', None),  # Optional field
+                'rom_variant': smartphone.get('rom_variant', None),  # Optional field
+                'variant_rank': smartphone.get('variant_rank', None),  # Optional field
+                'os': smartphone.get('os', None)  # Optional field
             })
             processed_price_ids.add(price_id)
         except Exception as e:
