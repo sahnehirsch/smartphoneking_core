@@ -391,6 +391,9 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
             
         # Process valid price
         try:
+            # Clean the product URL by removing tracking parameters
+            product_url = clean_product_url(verified_price.get('product_url', ''))
+            
             data_for_api.append({
                 'price_id': price_id,
                 'run_id': run_id,
@@ -398,7 +401,7 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
                 'retailer_id': retailer_id,
                 'retailer_name': retailer['retailer_name'],
                 'price': price['price'],
-                'product_url': verified_price.get('product_url', ''),
+                'product_url': product_url,  # Use cleaned URL
                 'is_hot': verified_price.get('is_hot', False),  # Get from prices table
                 'hotness_score': safe_convert_hotness_score(verified_price.get('hotness_score')),  # Convert to integer
                 'oem': smartphone['oem'],
