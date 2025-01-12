@@ -309,12 +309,12 @@ def process_price_batch(prices: List[Dict], run_id: str, processed_price_ids: Se
                 'smartphone_id': price['smartphone_id'],
                 'retailer_id': price['retailer_id'],
                 'price': price['price'],
-                'url': price['url'],
+                'url': price.get('product_url', ''),  # Changed from 'url' to 'product_url' with default empty string
                 'date_recorded': price['date_recorded']
             })
             processed_price_ids.add(price_id)
         except Exception as e:
-            logger.error(f"Error processing price {price_id}: {e}")
+            logger.error(f"Error processing price {price_id}: {str(e)}")  # Added str() to get full error message
             total_skipped += 1
             
     return data_for_api, total_skipped
