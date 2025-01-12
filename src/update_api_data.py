@@ -137,11 +137,10 @@ def get_valid_prices(run_id: str, page: int = 0) -> Tuple[Optional[List[Dict]], 
         
         # Get current page of data
         result = supabase.table('prices').select(
-            'smartphone_id,retailer_id,price,product_url,is_hot,hotness_score,run_id'
-        ).eq('run_id', run_id).eq('price_error', False).range(
-            page * Config.PAGE_SIZE, 
-            (page + 1) * Config.PAGE_SIZE - 1
-        ).execute()
+            'price_id,smartphone_id,retailer_id,price,product_url,is_hot,hotness_score,run_id'
+        ).eq('run_id', run_id).eq('price_error', False).order('price_id').limit(
+            Config.PAGE_SIZE
+        ).offset(page * Config.PAGE_SIZE).execute()
         
         if hasattr(result, 'error') and result.error:
             logger.error(f"Error getting prices: {result.error}")
@@ -179,7 +178,12 @@ def get_smartphones(smartphone_ids: List[int]) -> Optional[Dict]:
 def insert_data_batch(batch: List[Dict]) -> bool:
     """Insert a batch of data into data_for_api table"""
     try:
-        result = supabase.table('data_for_api').upsert(batch).execute()
+        # Use upsert with price_id as the unique key
+        result = supabase.table('data_for_api').upsert(
+            batch,
+            on_conflict='price_id'  # Use price_id as the unique constraint
+        ).execute()
+        
         if hasattr(result, 'error') and result.error:
             logger.error(f"Error inserting batch: {result.error}")
             return False
@@ -215,8 +219,8 @@ def update_data_for_api() -> bool:
         total_skipped = 0
         total_success = 0
         
-        # First, delete old records
-        logger.info("Deleting old records...")
+        # First, delete old records from previous runs
+        logger.info("Deleting old records from previous runs...")
         delete_result = supabase.table('data_for_api').delete().neq('run_id', run_id).execute()
         
         while True:
@@ -256,6 +260,7 @@ def update_data_for_api() -> bool:
                     continue
                 
                 data_for_api.append({
+                    'price_id': price['price_id'],  # Include price_id in the data
                     'smartphone_id': price['smartphone_id'],
                     'retailer_id': price['retailer_id'],
                     'price': price['price'],
