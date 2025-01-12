@@ -106,15 +106,22 @@ def clean_product_url(url: str) -> str:
 def get_latest_run_id() -> Optional[str]:
     """Get the latest run_id from prices table"""
     try:
+        # Get the run_id with the latest created_at timestamp
         result = supabase.table('prices').select(
-            'run_id'
-        ).order('run_id', desc=True).limit(1).execute()
+            'run_id,created_at'
+        ).order('created_at', desc=True).limit(1).execute()
         
         if hasattr(result, 'error') and result.error:
             logger.error(f"Error getting latest run: {result.error}")
             return None
             
-        return result.data[0]['run_id'] if result.data else None
+        if not result.data:
+            logger.error("No runs found in prices table")
+            return None
+            
+        run_id = result.data[0]['run_id']
+        logger.info(f"Using latest run_id: {run_id} (created at: {result.data[0]['created_at']})")
+        return run_id
     except Exception as e:
         logger.error(f"Error getting latest run_id: {e}")
         return None
