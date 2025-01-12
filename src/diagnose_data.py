@@ -96,6 +96,49 @@ def analyze_sequential_patterns(price_ids: List[int]) -> Dict:
         'sequences': sequences[:5]  # Show only first 5 sequences
     }
 
+def analyze_duplicates(data: List[Dict]) -> None:
+    """Analyze duplicate entries in the data"""
+    print("\n=== Checking for Duplicates ===")
+    print("Getting all entries for duplicate analysis...")
+    
+    # Group by composite key
+    duplicates = defaultdict(list)
+    for item in data:
+        key = f"{item['smartphone_id']}-{item['retailer_id']}-{item['price']}"
+        duplicates[key].append(item['price_id'])
+    
+    # Filter for keys with more than one entry
+    duplicate_keys = {k: v for k, v in duplicates.items() if len(v) > 1}
+    
+    print(f"\nFound {len(duplicate_keys)} keys with duplicates\n")
+    if not duplicate_keys:
+        return
+    
+    print("Top 5 duplicated entries:\n")
+    for key in sorted(duplicate_keys.keys(), key=lambda k: len(duplicate_keys[k]), reverse=True)[:5]:
+        price_ids = duplicate_keys[key]
+        print(f"Key {key}:")
+        print(f"  {len(price_ids)} occurrences")
+        print(f"  Price IDs: {price_ids}")
+        
+        # Analyze sequential patterns
+        sequences = []
+        current_seq = [price_ids[0]]
+        for i in range(1, len(price_ids)):
+            if price_ids[i] == price_ids[i-1] + 1:
+                current_seq.append(price_ids[i])
+            else:
+                if len(current_seq) > 1:
+                    sequences.append(current_seq[:])
+                current_seq = [price_ids[i]]
+        if len(current_seq) > 1:
+            sequences.append(current_seq)
+            
+        print("  Sequential patterns found:")
+        print(f"    Number of sequences: {len(sequences)}")
+        print(f"    Longest sequence: {max((len(s) for s in sequences), default=0)} IDs")
+        print(f"    Sample sequences: {sequences[:5]}\n")
+
 def diagnose_data():
     """Diagnose potential issues with data_for_api and prices tables"""
     print("\n=== Data Diagnosis Report ===")
@@ -181,29 +224,7 @@ def diagnose_data():
                                     'smartphone_id,retailer_id,price,price_id,run_id', 
                                     run_id)
         
-        # Process results to find duplicates
-        entry_counts = defaultdict(list)  # Changed to list to store price_ids
-        for entry in all_entries:
-            key = f"{entry['smartphone_id']}-{entry['retailer_id']}-{entry['price']}"
-            entry_counts[key].append(entry['price_id'])
-        
-        duplicates = {k: v for k, v in entry_counts.items() if len(v) > 1}
-        print(f"\nFound {len(duplicates)} keys with duplicates")
-        
-        if duplicates:
-            print("\nTop 5 duplicated entries:")
-            for key, price_ids in sorted(duplicates.items(), key=lambda x: len(x[1]), reverse=True)[:5]:
-                print(f"\nKey {key}:")
-                print(f"  {len(price_ids)} occurrences")
-                print(f"  Price IDs: {sorted(price_ids)}")
-                
-                # Analyze sequential patterns
-                patterns = analyze_sequential_patterns(price_ids)
-                if patterns['total_sequences'] > 0:
-                    print(f"  Sequential patterns found:")
-                    print(f"    Number of sequences: {patterns['total_sequences']}")
-                    print(f"    Longest sequence: {patterns['longest_sequence']} IDs")
-                    print(f"    Sample sequences: {patterns['sequences']}")
+        analyze_duplicates(all_entries)
     except Exception as e:
         print(f"Error checking for duplicates: {e}", file=sys.stderr)
     

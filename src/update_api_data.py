@@ -120,42 +120,36 @@ def get_latest_run_id() -> Optional[str]:
         return None
 
 @retry_on_error()
-def get_valid_prices(run_id: str, page: int = 0) -> Tuple[Optional[List[Dict]], bool]:
-    """Get valid prices for the given run_id with pagination"""
+def get_valid_prices(run_id: str, page: int) -> Tuple[List[Dict], bool]:
+    """Get a page of valid prices, ordered by smartphone_id, retailer_id, price to ensure consistent selection"""
     try:
-        # First, get total count
-        count_result = supabase.table('prices').select(
-            'price_id', count='exact'
-        ).eq('run_id', run_id).eq('price_error', False).execute()
+        offset = page * Config.PAGE_SIZE
+        result = (supabase.table('prices')
+                 .select('*')
+                 .eq('run_id', run_id)
+                 .eq('price_error', False)
+                 .order('smartphone_id', desc=False)
+                 .order('retailer_id', desc=False)
+                 .order('price', desc=False)
+                 .range(offset, offset + Config.PAGE_SIZE - 1)
+                 .execute())
         
-        if hasattr(count_result, 'error') and count_result.error:
-            logger.error(f"Error getting total count: {count_result.error}")
-            return None, False
+        if not hasattr(result, 'data'):
+            return [], False
             
-        total_count = count_result.count if hasattr(count_result, 'count') else 0
-        logger.info(f"Total valid prices for run {run_id}: {total_count}")
-        
-        # Get current page of data
-        result = supabase.table('prices').select(
-            'price_id,smartphone_id,retailer_id,price,product_url,is_hot,hotness_score,run_id'
-        ).eq('run_id', run_id).eq('price_error', False).order('price_id').limit(
-            Config.PAGE_SIZE
-        ).offset(page * Config.PAGE_SIZE).execute()
-        
-        if hasattr(result, 'error') and result.error:
-            logger.error(f"Error getting prices: {result.error}")
-            return None, False
-            
-        current_page_size = len(result.data)
-        logger.debug(f"Retrieved {current_page_size} records for page {page}")
-        
         # Check if there are more pages
-        has_more = (page + 1) * Config.PAGE_SIZE < total_count
+        next_page = (supabase.table('prices')
+                    .select('*', count='exact')
+                    .eq('run_id', run_id)
+                    .eq('price_error', False)
+                    .range(offset + Config.PAGE_SIZE, offset + Config.PAGE_SIZE)
+                    .execute())
+        has_more = bool(next_page.data) if hasattr(next_page, 'data') else False
         
         return result.data, has_more
     except Exception as e:
         logger.error(f"Error getting valid prices: {e}")
-        return None, False
+        return [], False
 
 @retry_on_error()
 def get_smartphones(smartphone_ids: List[int]) -> Optional[Dict]:
@@ -268,23 +262,18 @@ def update_data_for_api() -> bool:
         
         # Store processed price_ids and product keys to avoid duplicates
         processed_price_ids = set()
-        processed_product_keys = get_existing_product_keys(run_id)
+        processed_product_keys = set()
         
         while True:
             # Get page of prices with proper ordering
             prices, has_more = get_valid_prices(run_id, page)
             if not prices:
-                logger.error(f"Failed to get prices for page {page}")
+                if page == 0:
+                    logger.error("Failed to get prices for first page")
+                    return False
                 break
                 
-            # Filter out already processed price_ids
-            prices = [p for p in prices if p['price_id'] not in processed_price_ids]
-            if not prices:
-                logger.info(f"All prices in page {page} already processed, continuing...")
-                if not has_more:
-                    break
-                page += 1
-                continue
+            logger.info(f"Processing page {page} ({len(prices)} records)")
             
             # Get relevant smartphones for this batch
             smartphone_ids = list(set(p['smartphone_id'] for p in prices))
@@ -299,6 +288,8 @@ def update_data_for_api() -> bool:
             for price in prices:
                 # Skip if already processed
                 if price['price_id'] in processed_price_ids:
+                    logger.debug(f"Skipping already processed price_id: {price['price_id']}")
+                    total_skipped += 1
                     continue
                     
                 # Skip invalid prices
@@ -347,53 +338,28 @@ def update_data_for_api() -> bool:
                 processed_product_keys.add(product_key)
             
             # Insert in batches
-            for i in range(0, len(data_for_api), Config.BATCH_SIZE):
-                batch = data_for_api[i:i + Config.BATCH_SIZE]
-                if insert_data_batch(batch):
-                    total_success += len(batch)
-                else:
-                    logger.error(f"Failed to insert batch of size {len(batch)}")
-            
-            total_processed += len(prices)
-            logger.info(f"Processed {total_processed:,} records (Page {page})...")
+            if data_for_api:
+                for i in range(0, len(data_for_api), Config.BATCH_SIZE):
+                    batch = data_for_api[i:i + Config.BATCH_SIZE]
+                    if insert_data_batch(batch):
+                        total_success += len(batch)
+                    total_processed += len(batch)
+                    
+                logger.info(f"Progress: {total_processed:,}/{total_count:,} records processed ({total_skipped:,} skipped)")
             
             if not has_more:
-                logger.info("No more pages to process")
                 break
-                
             page += 1
         
-        if total_skipped > 0:
-            logger.warning(f"Skipped {total_skipped} records due to validation or missing data")
+        end_time = datetime.utcnow()
+        duration = (end_time - start_time).total_seconds()
+        logger.info(f"Finished processing {total_processed:,} records in {duration:.1f} seconds")
+        logger.info(f"Success: {total_success:,}, Skipped: {total_skipped:,}")
         
-        # Log completion
-        execution_time = (datetime.utcnow() - start_time).total_seconds()
-        logger.info(
-            f"Successfully inserted {total_success:,}/{total_processed:,} records "
-            f"in {execution_time:.2f} seconds"
-        )
-        
-        # Show a sample of the data
-        sample_query = supabase.table('data_for_api').select(
-            'smartphone_id,oem,model,price,is_hot,hotness_score'
-        ).limit(3).execute()
-        
-        if not hasattr(sample_query, 'error') or not sample_query.error:
-            logger.info("Sample of inserted data:")
-            for row in sample_query.data:
-                logger.info(
-                    f"{row['oem']} {row['model']}: "
-                    f"${row['price']} "
-                    f"({'HOT! ' if row['is_hot'] else ''}"
-                    f"Score: {row['hotness_score']})"
-                )
-        
-        return total_success > 0
+        return True
         
     except Exception as e:
-        logger.error(f"Error updating data_for_api: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"Error in update_data_for_api: {e}")
         return False
 
 if __name__ == '__main__':
