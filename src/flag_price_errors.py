@@ -164,7 +164,19 @@ def flag_price_errors():
                 all_price_ids.add(price['price_id'])
                 
                 # Check for NULL values in critical fields
-                if price.get('price') is None or price.get('retailer_id') is None or price.get('smartphone_id') is None:
+                if price.get('price') is None:
+                    null_count += 1
+                    flagged_price_ids.add(price['price_id'])
+                    price_updates = [{
+                        'price_id': price['price_id'], 
+                        'price_error': True, 
+                        'error_reason': 'Price is null', 
+                        'date_recorded': datetime.utcnow().isoformat()
+                    }]
+                    batch_update_prices(price_updates, [])
+                    logger.debug(f"Flagged price {price['price_id']} due to NULL price")
+                    continue
+                elif price.get('retailer_id') is None or price.get('smartphone_id') is None:
                     null_count += 1
                     flagged_price_ids.add(price['price_id'])
                     price_updates = [{
