@@ -66,35 +66,39 @@ def batch_update_prices(updates_true, updates_false):
         for i in range(0, len(updates_true), Config.UPDATE_BATCH_SIZE):
             batch = updates_true[i:i + Config.UPDATE_BATCH_SIZE]
             
-            # Only include fields we want to update
-            update_batch = [{
-                'price_id': update['price_id'],
-                'price_error': update['price_error'],
-                'error_reason': update['error_reason'],
-                'date_recorded': update['date_recorded']
-            } for update in batch]
-            
-            result = supabase.table('prices').upsert(update_batch).execute()
-            if hasattr(result, 'error') and result.error:
-                logger.error(f"Error updating batch: {result.error}")
-                raise Exception(f"Failed to update batch: {result.error}")
+            for update in batch:
+                # Update each record individually using price_id
+                result = (supabase.table('prices')
+                         .update({
+                             'price_error': update['price_error'],
+                             'error_reason': update['error_reason'],
+                             'date_recorded': update['date_recorded']
+                         })
+                         .eq('price_id', update['price_id'])
+                         .execute())
+                
+                if hasattr(result, 'error') and result.error:
+                    logger.error(f"Error updating price_id {update['price_id']}: {result.error}")
+                    raise Exception(f"Failed to update price: {result.error}")
         
         # Process false updates similarly
         for i in range(0, len(updates_false), Config.UPDATE_BATCH_SIZE):
             batch = updates_false[i:i + Config.UPDATE_BATCH_SIZE]
             
-            # Only include fields we want to update
-            update_batch = [{
-                'price_id': update['price_id'],
-                'price_error': update['price_error'],
-                'error_reason': update['error_reason'],
-                'date_recorded': update['date_recorded']
-            } for update in batch]
-            
-            result = supabase.table('prices').upsert(update_batch).execute()
-            if hasattr(result, 'error') and result.error:
-                logger.error(f"Error updating batch: {result.error}")
-                raise Exception(f"Failed to update batch: {result.error}")
+            for update in batch:
+                # Update each record individually using price_id
+                result = (supabase.table('prices')
+                         .update({
+                             'price_error': update['price_error'],
+                             'error_reason': update['error_reason'],
+                             'date_recorded': update['date_recorded']
+                         })
+                         .eq('price_id', update['price_id'])
+                         .execute())
+                
+                if hasattr(result, 'error') and result.error:
+                    logger.error(f"Error updating price_id {update['price_id']}: {result.error}")
+                    raise Exception(f"Failed to update price: {result.error}")
                 
     except Exception as e:
         logger.error(f"Error in batch_update_prices: {str(e)}")
