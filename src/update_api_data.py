@@ -384,7 +384,12 @@ def update_data_for_api() -> bool:
         date_recorded = latest_run.data[0]['date_recorded']
         logger.info(f"Using latest run_id: {run_id} (recorded at: {date_recorded})")
         
-        # Delete old records
+        # Delete existing records for the current run_id
+        logger.info("Deleting existing records for the current run_id...")
+        delete_result = supabase.table('data_for_api').delete().eq('run_id', run_id).execute()
+        logger.info(f"Delete result: data={delete_result.data} count={delete_result.count}")
+        
+        # Delete old records from previous runs
         logger.info("Deleting old records from previous runs...")
         delete_result = supabase.table('data_for_api').delete().neq('run_id', run_id).execute()
         logger.info(f"Delete result: {delete_result}")
