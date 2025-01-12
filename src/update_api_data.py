@@ -183,6 +183,23 @@ def get_smartphones(smartphone_ids: List[int]) -> Optional[Dict]:
         logger.error(f"Error getting smartphones: {e}")
         return None
 
+@retry_on_error()
+def get_retailers(retailer_ids: List[int]) -> Optional[Dict]:
+    """Get retailers by IDs"""
+    try:
+        result = supabase.table('retailers').select(
+            'retailer_id,retailer_name'
+        ).in_('retailer_id', retailer_ids).execute()
+        
+        if hasattr(result, 'error') and result.error:
+            logger.error(f"Error getting retailers: {result.error}")
+            return None
+            
+        return {r['retailer_id']: r for r in result.data}
+    except Exception as e:
+        logger.error(f"Error getting retailers: {e}")
+        return None
+
 def insert_data_batch(batch: List[Dict]) -> bool:
     """Insert a batch of data into data_for_api table"""
     try:
@@ -290,11 +307,19 @@ def update_data_for_api() -> bool:
                 
             logger.info(f"Processing page {page} ({len(prices)} records)")
             
-            # Get relevant smartphones for this batch
+            # Get relevant smartphones and retailers for this batch
             smartphone_ids = list(set(p['smartphone_id'] for p in prices))
+            retailer_ids = list(set(p['retailer_id'] for p in prices))
+            
             smartphones = get_smartphones(smartphone_ids)
+            retailers = get_retailers(retailer_ids)
+            
             if not smartphones:
                 logger.error("Could not get smartphones data")
+                return False
+            
+            if not retailers:
+                logger.error("Could not get retailers data")
                 return False
             
             # Process and prepare data
@@ -320,8 +345,15 @@ def update_data_for_api() -> bool:
                     continue
                 
                 smartphone = smartphones.get(price['smartphone_id'])
+                retailer = retailers.get(price['retailer_id'])
+                
                 if not smartphone:
                     logger.warning(f"Skipping price due to missing smartphone data: {price['smartphone_id']}")
+                    total_skipped += 1
+                    continue
+                
+                if not retailer:
+                    logger.warning(f"Skipping price due to missing retailer data: {price['retailer_id']}")
                     total_skipped += 1
                     continue
                 
@@ -336,6 +368,7 @@ def update_data_for_api() -> bool:
                     'price_id': price['price_id'],
                     'smartphone_id': price['smartphone_id'],
                     'retailer_id': price['retailer_id'],
+                    'retailer_name': retailer['retailer_name'],
                     'price': price['price'],
                     'product_url': clean_product_url(price.get('product_url')),
                     'is_hot': price.get('is_hot', False),
